@@ -1,0 +1,175 @@
+diff --git a/SOURCE_PROVENANCE.json b/SOURCE_PROVENANCE.json
+index a5a3613..2580dc0 100644
+--- a/SOURCE_PROVENANCE.json
++++ b/SOURCE_PROVENANCE.json
+@@ -175,5 +175,39 @@
+       "sourceSha256": "ca7e33c5bd9b43b42e075f33271452aefd3d61da005738fac21127a55f878d90",
+       "selectedDefinitions": null
+     }
+-  ]
++  ],
++  "comfyDeploymentPatch": {
++    "date": "2026-10-16",
++    "upstreamRepository": "https://github.com/akatz-labs/h3-character-swap-tool",
++    "upstreamCommit": "0670e4fdf95adf2262caa4b81afed2a9c4ae4b7b",
++    "upstreamPath": "worker_nodes/h3_character_swap",
++    "reason": "The Comfy build image has no ffmpeg or ffprobe on PATH; it ships the imageio-ffmpeg binary. The Comfy app proxy prices only on numeric tier inputs.",
++    "changes": [
++      {
++        "file": "ffmpeg_tools.py",
++        "change": "Added. ensure_ffmpeg_on_path() links the imageio-ffmpeg binary as ffmpeg on PATH when no ffmpeg is installed; probe_video_stream() reads width, height, sample aspect ratio and display rotation with PyAV."
++      },
++      {
++        "file": "__init__.py",
++        "change": "Calls ensure_ffmpeg_on_path() before importing the nodes.",
++        "upstreamSha256": "9a83be6322a89a96a3c91a2e516c10bfb58b44a93c25ea9e9022a051067efdd6"
++      },
++      {
++        "file": "video.py",
++        "change": "The ffprobe subprocess in PrepareVideo is replaced by probe_video_stream(). PrepareVideo's resolution choices are the integers 480 and 768 instead of strings, so the Comfy app proxy can price on it as a numeric tier; prepare() converts it back to a string.",
++        "upstreamSha256": "f569a0202aeb53c4aa0de1654456403a238f8f4ce9bead0252f8453a1d2d9f75"
++      },
++      {
++        "file": "requirements.txt",
++        "change": "Adds imageio-ffmpeg.",
++        "upstreamSha256": "452eb31df1efad0830cd85295472d771b4220601d693c8a0c496d7d453f306c4"
++      },
++      {
++        "file": "pyproject.toml",
++        "change": "Adds imageio-ffmpeg to dependencies.",
++        "upstreamSha256": "5fdae69646fa4b66b971fcee27874cb3789893e30b945bed2048decb905a79d8"
++      }
++    ],
++    "license": "GPL-3.0 (modifications under the same licence)"
++  }
+ }
+diff --git a/__init__.py b/__init__.py
+index 155d156..5fbc2ad 100644
+--- a/__init__.py
++++ b/__init__.py
+@@ -3,6 +3,9 @@
+ Derived from H3 Relay / H3 Performance under GPL-3.0; see SOURCE_PROVENANCE.json.
+ Only body generation, SAM support and source-aligned continuation are registered.
+ """
++from .ffmpeg_tools import ensure_ffmpeg_on_path
++ensure_ffmpeg_on_path()
++
+ from .nodes import PrepareVideo, SelectSubject, ExpandMask, OptionalAnchor, Shot, RecoverMasks
+ from .video import LabsH3TrimOutput
+ from .masked_latent import MaskedRegeneration
+diff --git b/ffmpeg_tools.py b/ffmpeg_tools.py
+new file mode 100644
+index 0000000..9995e10
+--- /dev/null
++++ b/ffmpeg_tools.py
+@@ -0,0 +1,41 @@
++"""FFmpeg access on hosts without system FFmpeg/FFprobe.
++
++Comfy deployment patch (2026-10-16), not part of the upstream package: the Comfy
++build image ships the imageio-ffmpeg binary but no ffmpeg or ffprobe on PATH.
++ensure_ffmpeg_on_path() exposes the bundled binary as `ffmpeg`, and
++probe_video_stream() replaces the single ffprobe call with PyAV, returning the
++fields display_dimensions() reads in ffprobe's JSON shape.
++"""
++import os
++import shutil
++import tempfile
++
++import av
++
++
++def ensure_ffmpeg_on_path():
++    if shutil.which("ffmpeg"):
++        return
++    import imageio_ffmpeg
++    directory = tempfile.mkdtemp(prefix="h3-ffmpeg-")
++    os.symlink(imageio_ffmpeg.get_ffmpeg_exe(), os.path.join(directory, "ffmpeg"))
++    os.environ["PATH"] = directory + os.pathsep + os.environ.get("PATH", "")
++
++
++def probe_video_stream(path):
++    """First video stream as ffprobe would report it, or None if there is none."""
++    with av.open(path) as container:
++        if not container.streams.video:
++            return None
++        stream = container.streams.video[0]
++        sar = stream.sample_aspect_ratio
++        rotation = 0
++        for frame in container.decode(stream):
++            rotation = frame.rotation or 0
++            break
++        return {
++            "width": stream.width,
++            "height": stream.height,
++            "sample_aspect_ratio": f"{sar.numerator}:{sar.denominator}" if sar else "1:1",
++            "side_data_list": [{"rotation": rotation}] if rotation else [],
++        }
+diff --git a/pyproject.toml b/pyproject.toml
+index 1ccc933..c52a525 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -4,5 +4,5 @@ version = "0.1.0"
+ description = "Focused H3 character swaps with SAM masks and source-aligned audio/history"
+ requires-python = ">=3.12"
+ license = "GPL-3.0-only"
+-dependencies = ["numpy", "scipy", "Pillow", "opencv-python-headless"]
++dependencies = ["numpy", "scipy", "Pillow", "opencv-python-headless", "imageio-ffmpeg"]
+ 
+diff --git a/requirements.txt b/requirements.txt
+index e7b0780..7575896 100644
+--- a/requirements.txt
++++ b/requirements.txt
+@@ -2,4 +2,4 @@ numpy
+ scipy
+ Pillow
+ opencv-python-headless
+-
++imageio-ffmpeg
+diff --git a/video.py b/video.py
+index 640d59a..104eb3b 100644
+--- a/video.py
++++ b/video.py
+@@ -14,6 +14,8 @@ import torch
+ from comfy_api.latest._input_impl.video_types import VideoFromFile, VideoFromComponents
+ from comfy_api.latest._util import VideoComponents
+ 
++from .ffmpeg_tools import probe_video_stream
++
+ LOG = logging.getLogger(__name__)
+ FPS = 24
+ MAX_FRAMES = 3592  # largest 17n+5 value within the installed H3 node's 3600 limit
+@@ -80,7 +82,7 @@ class LabsH3PrepareVideo:
+     def INPUT_TYPES(cls):
+         return {"required": {
+             "video": ("VIDEO",),
+-            "resolution": (["480", "768"], {"default": "480",
++            "resolution": ([480, 768], {"default": 480,
+                 "tooltip": "480 = up to 0.5 megapixels; 768 = up to 1.0 megapixel. Preserve aligned sources already within the budget; otherwise resize near the source aspect ratio and center-crop to the 32-pixel grid."}),
+         }, "optional": {
+             "duration_seconds": ("FLOAT", {"default": 0.0, "min": 0.0,
+@@ -94,6 +96,8 @@ class LabsH3PrepareVideo:
+     CATEGORY = "Akatz Labs/video"
+ 
+     def prepare(self, video, resolution, duration_seconds=0.0):
++        # Comfy deployment patch: integer choices so the app proxy can tier on this input.
++        resolution = str(int(resolution))
+         if resolution not in ("480", "768"):
+             raise ValueError("Choose 480 (0.5 MP) or 768 (1.0 MP).")
+         requested = min(MAX_FRAMES, max(1, math.floor(duration_seconds * FPS))) if duration_seconds > 0 else None
+@@ -106,13 +110,10 @@ class LabsH3PrepareVideo:
+                 source = str(Path(directory) / "source.mkv")
+                 video.save_to(source)
+             output = str(Path(directory) / "prepared.mkv")
+-            probe = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0",
+-                "-show_streams",
+-                "-of", "json", source], check=True, capture_output=True, timeout=30)
+-            streams = json.loads(probe.stdout).get("streams", [])
+-            if not streams:
++            stream = probe_video_stream(source)
++            if stream is None:
+                 raise ValueError("The upload does not contain a video stream.")
+-            target_width, target_height = canvas_dimensions(*display_dimensions(streams[0]), resolution)
++            target_width, target_height = canvas_dimensions(*display_dimensions(stream), resolution)
+             # FFmpeg handles display rotation; dar includes non-square pixels.
+             # Scale before decoding to a float tensor, then crop (never stretch).
+             # Avoid a one-pixel upscale from floating-point error at an exact DAR.
