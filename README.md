@@ -25,7 +25,7 @@ You need a Comfy Developer Platform account, an [API key](https://platform.comfy
    npm run dev
    ```
 
-5. Open <http://localhost:3000>. Choose a clip of one continuous shot with a person in its first frame, and a character image. Pick where the part starts and how long it is, then select **Swap character**.
+5. Open <http://localhost:3000>. Pick one of the examples, or choose a clip of one continuous shot with a person in its first frame, and a character image. Pick where the part starts and how long it is, then select **Swap character**.
 
 The first job may take several minutes while the deployment starts and loads its models; a 5 second part at 480p took about two minutes on a warm worker. The server reads the key from `.env.local`; do not expose it in a `NEXT_PUBLIC_` variable or commit the file.
 
@@ -57,7 +57,7 @@ Every other setting is Akatz's: 8 steps, CFG 1, `er_sde`, 124-frame windows with
 
 ## Change the app
 
-The form and its defaults are in `components/app-runner.tsx`. `lib/swap.ts` holds the part limits, the qualities and the prompt, and `lib/anchor.ts` the first-frame prompt.
+The form and its defaults are in `components/app-runner.tsx`, styled in `app/globals.css`. The four examples are the ones on comfy.org, read from `media.comfy.org` through `/api/examples`; change the list in `lib/examples.ts`. `lib/swap.ts` holds the part limits, the qualities and the prompt, and `lib/anchor.ts` the first-frame prompt.
 
 To edit the workflow, open it in ComfyUI and export **Workflow (API)**. Replace `workflows/swap.api.json` and update the node ids in `lib/swap.ts` if they moved. If the change adds a model or custom node, add it to the Comfy build and publish a new release before running the app.
 
